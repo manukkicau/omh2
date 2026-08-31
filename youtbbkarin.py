@@ -76,15 +76,15 @@ def run_ffmpeg(mode, video_paths, audio_path, stream_key, is_shorts, loop_playli
             log_callback("ERROR: Mode Video + MP3 membutuhkan 1 video dan 1 file MP3.")
             return
 
-        # Video di-loop terus, sedangkan -shortest membuat streaming berhenti
-        # ketika file MP3 selesai. Audio asli dari video tidak digunakan.
+        # Video DAN MP3 di-loop terus. Streaming hanya berhenti ketika user menekan Stop.
+        # Audio asli dari video tidak digunakan.
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-re",
             "-stream_loop", "-1",
             "-i", video_paths[0],
-            "-re",
+            "-stream_loop", "-1",
             "-i", audio_path,
             "-map", "0:v:0",
             "-map", "1:a:0",
@@ -98,7 +98,6 @@ def run_ffmpeg(mode, video_paths, audio_path, stream_key, is_shorts, loop_playli
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
-            "-shortest",
         ]
 
         if is_shorts:
@@ -112,7 +111,9 @@ def run_ffmpeg(mode, video_paths, audio_path, stream_key, is_shorts, loop_playli
         log_callback("Mode: Video + MP3")
         log_callback(f"Video loop: {Path(video_paths[0]).name}")
         log_callback(f"Audio MP3: {Path(audio_path).name}")
-        log_callback("Video akan di-loop sampai MP3 selesai.")
+        log_callback("Video di-loop terus.")
+        log_callback("MP3 di-loop terus.")
+        log_callback("Streaming berjalan terus sampai tombol Hentikan Streaming ditekan.")
         log_callback("Audio asli video tidak digunakan; MP3 menjadi audio utama.")
         log_callback("Menjalankan FFmpeg ke YouTube...")
 
@@ -273,7 +274,7 @@ def main():
 
     else:
         st.subheader("Upload Video + MP3")
-        st.caption("1 video akan di-loop otomatis. Streaming berhenti saat MP3 selesai.")
+        st.caption("1 video + 1 MP3: keduanya di-loop terus sampai Anda menekan Hentikan Streaming.")
 
         uploaded_video = st.file_uploader(
             "Video Background",
@@ -291,7 +292,7 @@ def main():
             "Audio MP3",
             type=["mp3"],
             key="mp3_uploader",
-            help="Durasi streaming mengikuti durasi MP3.",
+            help="MP3 akan di-loop terus selama streaming berjalan.",
         )
         if uploaded_audio is not None:
             audio_saved = save_uploaded_audio(uploaded_audio)
@@ -333,7 +334,7 @@ def main():
         "Ulangi playlist setelah video terakhir",
         value=True,
         disabled=(mode == "Video + MP3"),
-        help="Mode Video + MP3 selalu me-loop video sampai MP3 selesai.",
+        help="Mode Video + MP3 me-loop video dan MP3 terus-menerus.",
     )
 
     log_placeholder = st.empty()
