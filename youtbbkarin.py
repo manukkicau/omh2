@@ -43,16 +43,17 @@ def save_uploaded_file(uploaded_file, slot: int) -> str:
     return str(path)
 
 
-def save_uploaded_audio(uploaded_file) -> str:
-    """Simpan satu file MP3 sebagai audio utama untuk mode Video + MP3."""
+def save_uploaded_audio(uploaded_file, slot: int) -> str:
+    """Simpan MP3 berdasarkan slot agar urutan playlist selalu 1 -> 5."""
     original = safe_filename(uploaded_file.name)
     stem = Path(original).stem
     suffix = Path(original).suffix.lower()
-    filename = f"audio_{stem}{suffix}"
+    filename = f"audio_{slot}_{stem}{suffix}"
     path = UPLOAD_DIR / filename
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     return str(path)
+
 
 
 def make_concat_playlist(video_paths):
@@ -66,18 +67,29 @@ def make_concat_playlist(video_paths):
     return str(playlist)
 
 
-def run_ffmpeg(mode, video_paths, audio_path, stream_key, is_shorts, loop_playlist, log_callback):
+
+def make_audio_playlist(audio_paths):
+    """Buat playlist concat FFmpeg untuk MP3 1-5."""
+    playlist = UPLOAD_DIR / "audio_playlist.txt"
+    with open(playlist, "w", encoding="utf-8") as f:
+        for path in audio_paths:
+            p = Path(path).resolve().as_posix().replace("'", "'\\''")
+            f.write(f"file '{p}'\n")
+    return str(playlist)
+
+def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playlist, log_callback):
     global FFMPEG_PROCESS
 
     output_url = f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
 
     if mode == "Video + MP3":
-        if not video_paths or not audio_path:
-            log_callback("ERROR: Mode Video + MP3 membutuhkan 1 video dan 1 file MP3.")
+        if not video_paths or not audio_paths:
+            log_callback("ERROR: Mode Video + MP3 membutuhkan 1 video dan minimal 1 MP3.")
             return
 
-        # Video DAN MP3 di-loop terus. Streaming hanya berhenti ketika user menekan Stop.
+        # Video di-loop terus dan playlist MP3 1 -> 5 juga di-loop terus.
         # Audio asli dari video tidak digunakan.
+        audio_playlist = make_audio_playlist(audio_paths)
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -85,7 +97,9 @@ def run_ffmpeg(mode, video_paths, audio_path, stream_key, is_shorts, loop_playli
             "-stream_loop", "-1",
             "-i", video_paths[0],
             "-stream_loop", "-1",
-            "-i", audio_path,
+            "-f", "concat",
+            "-safe", "0",
+            "-i", audio_playlist,
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "libx264",
@@ -110,9 +124,11 @@ def run_ffmpeg(mode, video_paths, audio_path, stream_key, is_shorts, loop_playli
 
         log_callback("Mode: Video + MP3")
         log_callback(f"Video loop: {Path(video_paths[0]).name}")
-        log_callback(f"Audio MP3: {Path(audio_path).name}")
+        log_callback("Urutan MP3:")
+        for i, path in enumerate(audio_paths, 1):
+            log_callback(f"  {i}. {Path(path).name}")
         log_callback("Video di-loop terus.")
-        log_callback("MP3 di-loop terus.")
+        log_callback("MP3: 1 → 2 → 3 → 4 → 5 → kembali ke 1, loop terus.")
         log_callback("Streaming berjalan terus sampai tombol Hentikan Streaming ditekan.")
         log_callback("Audio asli video tidak digunakan; MP3 menjadi audio utama.")
         log_callback("Menjalankan FFmpeg ke YouTube...")
@@ -238,7 +254,7 @@ def main():
     )
 
     selected_paths = []
-    audio_path = None
+    audio_paths = []
 
     if mode == "4 Video Playlist":
         st.subheader("Upload Playlist — 4 Video")
@@ -273,14 +289,14 @@ def main():
             st.info("Belum ada video. Upload minimal 1 video untuk memulai streaming.")
 
     else:
-        st.subheader("Upload Video + MP3")
-        st.caption("1 video + 1 MP3: keduanya di-loop terus sampai Anda menekan Hentikan Streaming.")
+        st.subheader("Upload Video + MP3 — Playlist 5 MP3")
+        st.caption("1 video di-loop terus + MP3 1 → 2 → 3 → 4 → 5 → kembali ke MP3 1 terus-menerus.")
 
         uploaded_video = st.file_uploader(
             "Video Background",
             type=["mp4", "flv", "mov", "mkv", "webm"],
             key="single_video_uploader",
-            help="Video yang akan di-loop selama MP3 diputar.",
+            help="Video yang akan di-loop terus selama playlist MP3 berjalan.",
         )
         if uploaded_video is not None:
             video_saved = save_uploaded_file(uploaded_video, 1)
@@ -288,19 +304,17 @@ def main():
         else:
             video_saved = None
 
-        uploaded_audio = st.file_uploader(
-            "Audio MP3",
-            type=["mp3"],
-            key="mp3_uploader",
-            help="MP3 akan di-loop terus selama streaming berjalan.",
-        )
-        if uploaded_audio is not None:
-            audio_saved = save_uploaded_audio(uploaded_audio)
-            st.success(f"MP3 siap: {uploaded_audio.name}")
-        else:
-            audio_saved = None
+        for slot in range(1, 6):
+            uploaded_audio = st.file_uploader(
+                f"MP3 {slot}",
+                type=["mp3"],
+                key=f"mp3_uploader_{slot}",
+                help=f"MP3 ke-{slot}. Setelah MP3 {slot} selesai, lanjut ke MP3 berikutnya.",
+            )
+            if uploaded_audio is not None:
+                audio_saved = save_uploaded_audio(uploaded_audio, slot)
+                st.success(f"MP3 {slot} siap: {uploaded_audio.name}")
 
-        # Gunakan upload terbaru yang tersimpan jika widget Streamlit melakukan rerun.
         if video_saved:
             selected_paths = [video_saved]
         else:
@@ -312,21 +326,21 @@ def main():
             if candidates:
                 selected_paths = [str(candidates[0])]
 
-        if audio_saved:
-            audio_path = audio_saved
-        else:
+        for slot in range(1, 6):
             candidates = sorted(
-                UPLOAD_DIR.glob("audio_*.mp3"),
+                UPLOAD_DIR.glob(f"audio_{slot}_*.mp3"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
             if candidates:
-                audio_path = str(candidates[0])
+                audio_paths.append(str(candidates[0]))
 
         if selected_paths:
             st.write(f"**Video:** {Path(selected_paths[0]).name}")
-        if audio_path:
-            st.write(f"**MP3:** {Path(audio_path).name}")
+        if audio_paths:
+            st.write("**Playlist MP3 aktif:**")
+            for i, path in enumerate(audio_paths, 1):
+                st.write(f"{i}. {Path(path).name}")
 
     stream_key = st.text_input("Stream Key YouTube", type="password")
     is_shorts = st.checkbox("Mode Shorts (720x1280)")
@@ -355,15 +369,15 @@ def main():
         if st.button("▶️ Mulai Streaming", disabled=streaming, use_container_width=True):
             if not selected_paths:
                 st.error("Upload video terlebih dahulu!")
-            elif mode == "Video + MP3" and not audio_path:
-                st.error("Upload file MP3 terlebih dahulu!")
+            elif mode == "Video + MP3" and not audio_paths:
+                st.error("Upload minimal 1 file MP3 terlebih dahulu!")
             elif not stream_key:
                 st.error("Stream Key YouTube harus diisi!")
             else:
                 st.session_state["logs"] = []
                 thread = threading.Thread(
                     target=run_ffmpeg,
-                    args=(mode, selected_paths, audio_path, stream_key, is_shorts, loop_playlist, log_callback),
+                    args=(mode, selected_paths, audio_paths, stream_key, is_shorts, loop_playlist, log_callback),
                     daemon=True,
                 )
                 thread.start()
