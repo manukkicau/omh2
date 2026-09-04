@@ -114,14 +114,21 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
             "-map", "1:a:0",
             "-c:v", "libx264",
             "-preset", "veryfast",
+            "-tune", "zerolatency",
+            "-r", "30",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "main",
             "-b:v", "2500k",
             "-maxrate", "2500k",
             "-bufsize", "5000k",
             "-g", "60",
             "-keyint_min", "60",
+            "-sc_threshold", "0",
             "-c:a", "aac",
             "-b:a", "128k",
-            "-ar", "44100",
+            "-ar", "48000",
+            "-af", "aresample=async=1:first_pts=0",
+            "-fps_mode", "cfr",
         ]
 
         if is_shorts:
@@ -133,7 +140,13 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
         if duration_seconds:
             cmd += ["-t", str(duration_seconds)]
 
-        cmd += ["-f", "flv", output_url]
+        cmd += [
+            "-flvflags", "no_duration_filesize",
+            "-muxdelay", "0",
+            "-muxpreload", "0",
+            "-f", "flv",
+            output_url,
+        ]
 
         log_callback("Mode: Video + MP3")
         log_callback(f"Video loop: {Path(video_paths[0]).name}")
@@ -174,14 +187,21 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
             "-i", playlist,
             "-c:v", "libx264",
             "-preset", "veryfast",
+            "-tune", "zerolatency",
+            "-r", "30",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "main",
             "-b:v", "2500k",
             "-maxrate", "2500k",
             "-bufsize", "5000k",
             "-g", "60",
             "-keyint_min", "60",
+            "-sc_threshold", "0",
             "-c:a", "aac",
             "-b:a", "128k",
-            "-ar", "44100",
+            "-ar", "48000",
+            "-af", "aresample=async=1:first_pts=0",
+            "-fps_mode", "cfr",
         ]
 
         if is_shorts:
@@ -317,7 +337,8 @@ def main():
 
     else:
         st.subheader("Upload Video + MP3 — Playlist 5 MP3")
-        st.caption("1 video di-loop terus + MP3 1 → 2 → 3 → 4 → 5 → kembali ke MP3 1 terus-menerus.")
+        st.caption("1 video di-loop terus + MP3 1 → 2 → 3 → 4 → 5. Encoding dibuat stabil untuk mengurangi buffering/loading saat live.")
+        st.info("Tips: gunakan MP4 H.264 + AAC dan MP3 bitrate normal (128–320 kbps) agar perpindahan audio lebih lancar.")
 
         uploaded_video = st.file_uploader(
             "Video Background",
