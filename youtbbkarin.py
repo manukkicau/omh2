@@ -3,6 +3,8 @@ import subprocess
 import threading
 import os
 import time
+import urllib.request
+import urllib.parse
 from pathlib import Path
 import streamlit.components.v1 as components
 
@@ -43,6 +45,54 @@ def save_uploaded_file(uploaded_file, slot: int) -> str:
     return str(path)
 
 
+def download_video_from_url(url: str, slot: int, filename_hint: str = "") -> str:
+    """Download video dari URL langsung atau Google Drive ke server."""
+    url = url.strip()
+    if not url:
+        raise ValueError("Link video kosong.")
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Link harus diawali http:// atau https://")
+
+    # Google Drive: gunakan gdown agar link sharing file dapat diunduh.
+    if "drive.google.com" in parsed.netloc or "docs.google.com" in parsed.netloc:
+        try:
+            import gdown
+        except ImportError as exc:
+            raise RuntimeError("Library gdown belum terpasang. Tambahkan gdown di requirements.txt.") from exc
+        hint = safe_filename(filename_hint or f"video_{slot}.mp4")
+        if not Path(hint).suffix:
+            hint += ".mp4"
+        target = UPLOAD_DIR / f"video_{slot}_drive_{hint}"
+        result = gdown.download(url=url, output=str(target), quiet=True, fuzzy=True)
+        if not result or not target.exists() or target.stat().st_size == 0:
+            raise RuntimeError("Google Drive gagal diunduh. Pastikan file disetel 'Anyone with the link'.")
+        return str(target)
+
+    # URL file langsung (MP4/MKV/WebM, dll).
+    hint = filename_hint.strip()
+    if not hint:
+        name = Path(urllib.parse.unquote(parsed.path)).name
+        hint = name or f"video_{slot}.mp4"
+    hint = safe_filename(hint)
+    if not Path(hint).suffix:
+        hint += ".mp4"
+    target = UPLOAD_DIR / f"video_{slot}_link_{hint}"
+
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as out:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+
+    if not target.exists() or target.stat().st_size == 0:
+        raise RuntimeError("Link tidak menghasilkan file video.")
+    return str(target)
+
+
 def save_uploaded_audio(uploaded_file, slot: int) -> str:
     """Simpan MP3 berdasarkan slot agar urutan playlist selalu 1 -> 5."""
     original = safe_filename(uploaded_file.name)
@@ -57,7 +107,7 @@ def save_uploaded_audio(uploaded_file, slot: int) -> str:
 
 
 def make_concat_playlist(video_paths):
-    """Buat file playlist FFmpeg dalam urutan upload 1 -> 4."""
+    """Buat file playlist FFmpeg dalam urutan video 1 -> 5."""
     playlist = UPLOAD_DIR / "playlist.txt"
     with open(playlist, "w", encoding="utf-8") as f:
         for path in video_paths:
@@ -219,7 +269,7 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
         log_callback("Urutan video:")
         for i, path in enumerate(video_paths, 1):
             log_callback(f"  {i}. {Path(path).name}")
-        log_callback("Playlist: Video 1 → Video 2 → Video 3 → Video 4")
+        log_callback("Playlist: Video 1 → Video 2 → Video 3 → Video 4 → Video 5")
         if playback_mode == "Tanpa batas":
             log_callback("Playlist video akan loop terus.")
         elif playback_mode == "Jumlah pengulangan":
@@ -304,53 +354,168 @@ def main():
     audio_paths = []
 
     if mode == "4 Video Playlist":
-        st.subheader("Upload Playlist — 4 Video")
-        st.caption("Video akan dimainkan sesuai urutan: Video 1 → Video 2 → Video 3 → Video 4.")
+        st.subheader("Upload Playlist — 5 Video")
+        st.caption("Video akan dimainkan sesuai urutan: Video 1 → Video 2 → Video 3 → Video 4 → Video 5.")
+        st.info("Setiap slot bisa menggunakan Upload, Link langsung, atau Google Drive. Video dari Link/Drive diunduh langsung ke server sehingga tidak perlu upload melalui browser.")
 
-        for slot in range(1, 5):
-            uploaded_file = st.file_uploader(
-                f"Video {slot}",
-                type=["mp4", "flv", "mov", "mkv", "webm"],
-                key=f"video_uploader_{slot}",
-                help=f"Video ke-{slot} dalam urutan playlist."
+        for slot in range(1, 6):
+            st.markdown(f"### Video {slot}")
+            source = st.radio(
+                f"Sumber Video {slot}",
+                ["Upload dari perangkat", "Link langsung", "Google Drive"],
+                horizontal=True,
+                key=f"playlist_video_source_{slot}",
             )
-            if uploaded_file is not None:
-                save_uploaded_file(uploaded_file, slot)
-                st.success(f"Video {slot} siap: {uploaded_file.name}")
 
-        # Ambil file terbaru dari masing-masing slot sehingga urutan tetap 1-4.
-        for slot in range(1, 5):
-            candidates = sorted(
-                UPLOAD_DIR.glob(f"video_{slot}_*"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            if source == "Upload dari perangkat":
+                uploaded_file = st.file_uploader(
+                    f"Upload Video {slot}",
+                    type=["mp4", "flv", "mov", "mkv", "webm"],
+                    key=f"video_uploader_{slot}",
+                    help=f"Video ke-{slot} dalam urutan playlist."
+                )
+                if uploaded_file is not None:
+                    saved = save_uploaded_file(uploaded_file, slot)
+                    st.session_state[f"playlist_video_path_{slot}"] = saved
+                    st.success(f"Video {slot} siap: {uploaded_file.name}")
+
+            elif source == "Link langsung":
+                video_url = st.text_input(
+                    f"URL Video {slot}",
+                    placeholder="https://contoh.com/video.mp4",
+                    key=f"playlist_video_url_{slot}",
+                    help="Gunakan direct link yang bisa diakses tanpa login dan mengarah ke file video."
+                )
+                link_name = st.text_input(
+                    "Nama file (opsional)",
+                    placeholder=f"video_{slot}.mp4",
+                    key=f"playlist_video_name_{slot}",
+                )
+                if st.button(f"⬇️ Ambil Video {slot} dari Link", key=f"playlist_download_link_{slot}", use_container_width=True):
+                    if not video_url.strip():
+                        st.error(f"Masukkan URL Video {slot} terlebih dahulu.")
+                    else:
+                        try:
+                            with st.spinner(f"Mengunduh Video {slot} ke server..."):
+                                saved = download_video_from_url(video_url, slot, link_name)
+                            st.session_state[f"playlist_video_path_{slot}"] = saved
+                            st.success(f"Video {slot} siap: {Path(saved).name}")
+                        except Exception as e:
+                            st.error(f"Gagal mengambil Video {slot}: {e}")
+
+            else:
+                drive_url = st.text_input(
+                    f"Link Google Drive Video {slot}",
+                    placeholder="https://drive.google.com/file/d/.../view?usp=sharing",
+                    key=f"playlist_video_drive_url_{slot}",
+                    help="File Google Drive harus dapat diakses dengan 'Anyone with the link'."
+                )
+                drive_name = st.text_input(
+                    "Nama file (opsional)",
+                    placeholder=f"video_{slot}.mp4",
+                    key=f"playlist_video_drive_name_{slot}",
+                )
+                if st.button(f"☁️ Ambil Video {slot} dari Google Drive", key=f"playlist_download_drive_{slot}", use_container_width=True):
+                    if not drive_url.strip():
+                        st.error(f"Masukkan link Google Drive Video {slot} terlebih dahulu.")
+                    else:
+                        try:
+                            with st.spinner(f"Mengunduh Video {slot} dari Google Drive ke server..."):
+                                saved = download_video_from_url(drive_url, slot, drive_name)
+                            st.session_state[f"playlist_video_path_{slot}"] = saved
+                            st.success(f"Video {slot} siap: {Path(saved).name}")
+                        except Exception as e:
+                            st.error(f"Gagal mengambil Video {slot} dari Google Drive: {e}")
+
+            candidates = sorted(UPLOAD_DIR.glob(f"video_{slot}_*"), key=lambda p: p.stat().st_mtime, reverse=True)
             if candidates:
-                selected_paths.append(str(candidates[0]))
+                st.session_state[f"playlist_video_path_{slot}"] = str(candidates[0])
+            selected = st.session_state.get(f"playlist_video_path_{slot}")
+            if selected and Path(selected).exists():
+                selected_paths.append(selected)
+                st.caption(f"Aktif: {Path(selected).name}")
 
         if selected_paths:
             st.write("**Playlist aktif:**")
             for i, path in enumerate(selected_paths, 1):
                 st.write(f"{i}. {Path(path).name}")
         else:
-            st.info("Belum ada video. Upload minimal 1 video untuk memulai streaming.")
+            st.info("Belum ada video. Tambahkan minimal 1 video untuk memulai streaming.")
 
     else:
         st.subheader("Upload Video + MP3 — Playlist 5 MP3")
         st.caption("1 video di-loop terus + MP3 1 → 2 → 3 → 4 → 5. Encoding dibuat stabil untuk mengurangi buffering/loading saat live.")
         st.info("Tips: gunakan MP4 H.264 + AAC dan MP3 bitrate normal (128–320 kbps) agar perpindahan audio lebih lancar.")
 
-        uploaded_video = st.file_uploader(
-            "Video Background",
-            type=["mp4", "flv", "mov", "mkv", "webm"],
-            key="single_video_uploader",
-            help="Video yang akan di-loop terus selama playlist MP3 berjalan.",
+        video_saved = None
+        video_source = st.radio(
+            "Sumber Video Background",
+            ["Upload dari perangkat", "Link langsung", "Google Drive"],
+            horizontal=True,
+            key="video_source_mode",
+            help="Link/Drive diunduh langsung ke server sehingga tidak perlu upload ulang lewat browser.",
         )
-        if uploaded_video is not None:
-            video_saved = save_uploaded_file(uploaded_video, 1)
-            st.success(f"Video siap: {uploaded_video.name}")
+
+        if video_source == "Upload dari perangkat":
+            uploaded_video = st.file_uploader(
+                "Video Background",
+                type=["mp4", "flv", "mov", "mkv", "webm"],
+                key="single_video_uploader",
+                help="Video yang akan di-loop terus selama playlist MP3 berjalan.",
+            )
+            if uploaded_video is not None:
+                video_saved = save_uploaded_file(uploaded_video, 1)
+                st.success(f"Video siap: {uploaded_video.name}")
+
+        elif video_source == "Link langsung":
+            video_url = st.text_input(
+                "URL Video",
+                placeholder="https://contoh.com/video.mp4",
+                key="video_direct_url",
+                help="Gunakan direct link yang bisa diakses tanpa login dan mengarah langsung ke file video.",
+            )
+            link_name = st.text_input(
+                "Nama file (opsional)",
+                placeholder="video.mp4",
+                key="video_direct_name",
+            )
+            if st.button("⬇️ Ambil Video dari Link", key="download_video_link", use_container_width=True):
+                if not video_url.strip():
+                    st.error("Masukkan URL video terlebih dahulu.")
+                else:
+                    try:
+                        with st.spinner("Mengunduh video ke server..."):
+                            video_saved = download_video_from_url(video_url, 1, link_name)
+                        st.session_state["remote_video_path"] = video_saved
+                        st.success(f"Video siap: {Path(video_saved).name}")
+                    except Exception as e:
+                        st.error(f"Gagal mengambil video: {e}")
+            video_saved = st.session_state.get("remote_video_path")
+
         else:
-            video_saved = None
+            drive_url = st.text_input(
+                "Link Google Drive",
+                placeholder="https://drive.google.com/file/d/.../view?usp=sharing",
+                key="video_drive_url",
+                help="File harus bisa diakses dengan 'Anyone with the link'.",
+            )
+            drive_name = st.text_input(
+                "Nama file (opsional)",
+                placeholder="video.mp4",
+                key="video_drive_name",
+            )
+            if st.button("☁️ Ambil Video dari Google Drive", key="download_video_drive", use_container_width=True):
+                if not drive_url.strip():
+                    st.error("Masukkan link Google Drive terlebih dahulu.")
+                else:
+                    try:
+                        with st.spinner("Mengunduh video dari Google Drive ke server..."):
+                            video_saved = download_video_from_url(drive_url, 1, drive_name)
+                        st.session_state["remote_video_path"] = video_saved
+                        st.success(f"Video siap: {Path(video_saved).name}")
+                    except Exception as e:
+                        st.error(f"Gagal mengambil video dari Google Drive: {e}")
+            video_saved = st.session_state.get("remote_video_path")
 
         for slot in range(1, 6):
             uploaded_audio = st.file_uploader(
