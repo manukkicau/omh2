@@ -77,10 +77,11 @@ def make_audio_playlist(audio_paths):
             f.write(f"file '{p}'\n")
     return str(playlist)
 
-def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playlist, log_callback):
+def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_mode, repeat_count, duration_hours, log_callback):
     global FFMPEG_PROCESS
 
     output_url = f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
+    duration_seconds = int(duration_hours * 3600) if playback_mode == "Durasi streaming" and duration_hours else None
 
     if mode == "Video + MP3":
         if not video_paths or not audio_paths:
@@ -90,13 +91,22 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playl
         # Video di-loop terus dan playlist MP3 1 -> 5 juga di-loop terus.
         # Audio asli dari video tidak digunakan.
         audio_playlist = make_audio_playlist(audio_paths)
+        # Video selalu loop; durasi/putaran dikendalikan oleh mode playback di bawah.
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-re",
             "-stream_loop", "-1",
             "-i", video_paths[0],
-            "-stream_loop", "-1",
+        ]
+
+        if playback_mode == "Jumlah pengulangan":
+            audio_loops = max(0, repeat_count - 1)
+            cmd += ["-stream_loop", str(audio_loops)]
+        else:
+            cmd += ["-stream_loop", "-1"]
+
+        cmd += [
             "-f", "concat",
             "-safe", "0",
             "-i", audio_playlist,
@@ -120,6 +130,9 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playl
                 "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
             ]
 
+        if duration_seconds:
+            cmd += ["-t", str(duration_seconds)]
+
         cmd += ["-f", "flv", output_url]
 
         log_callback("Mode: Video + MP3")
@@ -128,8 +141,13 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playl
         for i, path in enumerate(audio_paths, 1):
             log_callback(f"  {i}. {Path(path).name}")
         log_callback("Video di-loop terus.")
-        log_callback("MP3: 1 → 2 → 3 → 4 → 5 → kembali ke 1, loop terus.")
-        log_callback("Streaming berjalan terus sampai tombol Hentikan Streaming ditekan.")
+        if playback_mode == "Jumlah pengulangan":
+            log_callback(f"Playlist MP3 diputar {repeat_count} kali.")
+        elif playback_mode == "Durasi streaming":
+            log_callback(f"Streaming dibatasi {duration_hours:g} jam.")
+        else:
+            log_callback("MP3: 1 → 2 → 3 → 4 → 5 → kembali ke 1, loop terus.")
+        log_callback("Streaming berjalan sesuai pengaturan sampai selesai atau dihentikan manual.")
         log_callback("Audio asli video tidak digunakan; MP3 menjadi audio utama.")
         log_callback("Menjalankan FFmpeg ke YouTube...")
 
@@ -145,8 +163,10 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playl
             "-re",
         ]
 
-        if loop_playlist:
+        if playback_mode == "Tanpa batas":
             cmd += ["-stream_loop", "-1"]
+        elif playback_mode == "Jumlah pengulangan":
+            cmd += ["-stream_loop", str(max(0, repeat_count - 1))]
 
         cmd += [
             "-f", "concat",
@@ -170,6 +190,9 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playl
                 "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
             ]
 
+        if duration_seconds:
+            cmd += ["-t", str(duration_seconds)]
+
         cmd += ["-f", "flv", output_url]
 
         log_callback("Mode: 4 Video Playlist")
@@ -177,8 +200,12 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, loop_playl
         for i, path in enumerate(video_paths, 1):
             log_callback(f"  {i}. {Path(path).name}")
         log_callback("Playlist: Video 1 → Video 2 → Video 3 → Video 4")
-        if loop_playlist:
-            log_callback("Setelah video terakhir selesai, playlist kembali ke Video 1.")
+        if playback_mode == "Tanpa batas":
+            log_callback("Playlist video akan loop terus.")
+        elif playback_mode == "Jumlah pengulangan":
+            log_callback(f"Playlist video diputar {repeat_count} kali.")
+        elif playback_mode == "Durasi streaming":
+            log_callback(f"Streaming dibatasi {duration_hours:g} jam.")
         log_callback("Menjalankan FFmpeg ke YouTube...")
 
     try:
@@ -344,12 +371,35 @@ def main():
 
     stream_key = st.text_input("Stream Key YouTube", type="password")
     is_shorts = st.checkbox("Mode Shorts (720x1280)")
-    loop_playlist = st.checkbox(
-        "Ulangi playlist setelah video terakhir",
-        value=True,
-        disabled=(mode == "Video + MP3"),
-        help="Mode Video + MP3 me-loop video dan MP3 terus-menerus.",
+
+    st.subheader("Pengaturan Durasi Streaming")
+    playback_mode = st.radio(
+        "Jalankan streaming",
+        ["Tanpa batas", "Jumlah pengulangan", "Durasi streaming"],
+        horizontal=True,
+        help="Tanpa batas = loop terus. Jumlah pengulangan = jumlah putaran playlist. Durasi streaming = berhenti otomatis setelah waktu yang dipilih.",
     )
+
+    repeat_count = 1
+    duration_hours = None
+    if playback_mode == "Jumlah pengulangan":
+        repeat_count = st.number_input(
+            "Jumlah pengulangan playlist",
+            min_value=1,
+            max_value=100000,
+            value=1,
+            step=1,
+            help="1 = satu kali, 2 = dua kali, dst. Pada Mode Video + MP3, yang diulang adalah urutan MP3.",
+        )
+    elif playback_mode == "Durasi streaming":
+        duration_hours = st.number_input(
+            "Durasi streaming (jam)",
+            min_value=0.01,
+            max_value=720.0,
+            value=1.0,
+            step=0.5,
+            help="Streaming akan dihentikan otomatis setelah durasi ini.",
+        )
 
     log_placeholder = st.empty()
     logs = st.session_state.get("logs", [])
@@ -377,7 +427,7 @@ def main():
                 st.session_state["logs"] = []
                 thread = threading.Thread(
                     target=run_ffmpeg,
-                    args=(mode, selected_paths, audio_paths, stream_key, is_shorts, loop_playlist, log_callback),
+                    args=(mode, selected_paths, audio_paths, stream_key, is_shorts, playback_mode, int(repeat_count), duration_hours, log_callback),
                     daemon=True,
                 )
                 thread.start()
