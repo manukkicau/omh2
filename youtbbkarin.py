@@ -6,7 +6,6 @@ import time
 import urllib.request
 import urllib.parse
 from pathlib import Path
-import streamlit.components.v1 as components
 
 # Install streamlit jika belum ada
 try:
@@ -106,26 +105,29 @@ def save_uploaded_audio(uploaded_file, slot: int) -> str:
 
 
 
-def make_concat_playlist(video_paths):
-    """Buat file playlist FFmpeg dalam urutan video 1 -> 5."""
+def make_concat_playlist(video_paths, repeat_count=1):
+    """Buat playlist FFmpeg Video 1 -> 5, dengan jumlah putaran eksplisit."""
     playlist = UPLOAD_DIR / "playlist.txt"
+    repeat_count = max(1, int(repeat_count))
     with open(playlist, "w", encoding="utf-8") as f:
-        for path in video_paths:
-            # Escape single quote untuk format concat FFmpeg.
-            p = Path(path).resolve().as_posix().replace("'", "'\\''")
-            f.write(f"file '{p}'\n")
+        for _ in range(repeat_count):
+            for path in video_paths:
+                p = Path(path).resolve().as_posix().replace("'", "'\\''")
+                f.write(f"file '{p}'\n")
     return str(playlist)
 
 
-
-def make_audio_playlist(audio_paths):
-    """Buat playlist concat FFmpeg untuk MP3 1-5."""
+def make_audio_playlist(audio_paths, repeat_count=1):
+    """Buat playlist audio yang diulang secara eksplisit agar jumlah putaran pasti."""
     playlist = UPLOAD_DIR / "audio_playlist.txt"
+    repeat_count = max(1, int(repeat_count))
     with open(playlist, "w", encoding="utf-8") as f:
-        for path in audio_paths:
-            p = Path(path).resolve().as_posix().replace("'", "'\\''")
-            f.write(f"file '{p}'\n")
+        for _ in range(repeat_count):
+            for path in audio_paths:
+                p = Path(path).resolve().as_posix().replace("'", "'\\''")
+                f.write(f"file '{p}'\n")
     return str(playlist)
+
 
 def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_mode, repeat_count, duration_hours, log_callback):
     global FFMPEG_PROCESS
@@ -138,24 +140,28 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
             log_callback("ERROR: Mode Video + MP3 membutuhkan 1 video dan minimal 1 MP3.")
             return
 
-        # Video di-loop terus dan playlist MP3 1 -> 5 juga di-loop terus.
-        # Audio asli dari video tidak digunakan.
-        audio_playlist = make_audio_playlist(audio_paths)
-        # Video selalu loop; durasi/putaran dikendalikan oleh mode playback di bawah.
+        # Penting: audio sebelumnya dibaca terlalu cepat oleh FFmpeg karena hanya
+        # input video yang memakai -re. Ini bisa membuat antrean audio membesar
+        # dan live YouTube tersendat/putus. Sekarang kedua input dibaca realtime.
+        if playback_mode == "Jumlah pengulangan":
+            audio_playlist = make_audio_playlist(audio_paths, repeat_count)
+            audio_loop_args = []
+        else:
+            audio_playlist = make_audio_playlist(audio_paths, 1)
+            audio_loop_args = ["-stream_loop", "-1"]
+
         cmd = [
             "ffmpeg",
             "-hide_banner",
+            "-loglevel", "info",
+            "-thread_queue_size", "256",
             "-re",
             "-stream_loop", "-1",
             "-i", video_paths[0],
+            "-thread_queue_size", "256",
+            "-re",
         ]
-
-        if playback_mode == "Jumlah pengulangan":
-            audio_loops = max(0, repeat_count - 1)
-            cmd += ["-stream_loop", str(audio_loops)]
-        else:
-            cmd += ["-stream_loop", "-1"]
-
+        cmd += audio_loop_args
         cmd += [
             "-f", "concat",
             "-safe", "0",
@@ -163,22 +169,26 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", "ultrafast",
             "-tune", "zerolatency",
-            "-r", "30",
+            "-r", "20",
             "-pix_fmt", "yuv420p",
             "-profile:v", "main",
+            "-threads", "2",
             "-b:v", "2500k",
             "-maxrate", "2500k",
-            "-bufsize", "5000k",
-            "-g", "60",
-            "-keyint_min", "60",
+            "-bufsize", "3600k",
+            "-g", "50",
+            "-keyint_min", "50",
             "-sc_threshold", "0",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "48000",
+            "-ac", "2",
             "-af", "aresample=async=1:first_pts=0",
             "-fps_mode", "cfr",
+            "-max_interleave_delta", "0",
+            "-avoid_negative_ts", "make_zero",
         ]
 
         if is_shorts:
@@ -186,9 +196,19 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
                 "-vf",
                 "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
             ]
+        else:
+            # Target video landscape hingga 1080p dengan 20fps dan preset ultrafast agar CPU tetap serendah mungkin.
+            cmd += [
+                "-vf",
+                "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+            ]
 
         if duration_seconds:
             cmd += ["-t", str(duration_seconds)]
+        elif playback_mode == "Jumlah pengulangan":
+            # Video di-loop, tetapi output wajib berhenti tepat setelah playlist
+            # MP3 selesai sesuai jumlah pengulangan.
+            cmd += ["-shortest"]
 
         cmd += [
             "-flvflags", "no_duration_filesize",
@@ -198,20 +218,19 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
             output_url,
         ]
 
-        log_callback("Mode: Video + MP3")
+        log_callback("Mode: Video + MP3 — mode audio realtime")
         log_callback(f"Video loop: {Path(video_paths[0]).name}")
         log_callback("Urutan MP3:")
         for i, path in enumerate(audio_paths, 1):
             log_callback(f"  {i}. {Path(path).name}")
-        log_callback("Video di-loop terus.")
+        log_callback("Audio dibaca realtime (-re) agar antrean tidak menumpuk.")
         if playback_mode == "Jumlah pengulangan":
-            log_callback(f"Playlist MP3 diputar {repeat_count} kali.")
+            log_callback(f"Playlist MP3 diputar tepat {repeat_count} kali, lalu streaming berhenti.")
         elif playback_mode == "Durasi streaming":
             log_callback(f"Streaming dibatasi {duration_hours:g} jam.")
         else:
             log_callback("MP3: 1 → 2 → 3 → 4 → 5 → kembali ke 1, loop terus.")
-        log_callback("Streaming berjalan sesuai pengaturan sampai selesai atau dihentikan manual.")
-        log_callback("Audio asli video tidak digunakan; MP3 menjadi audio utama.")
+        log_callback("Video di-loop terus; audio asli video tidak digunakan.")
         log_callback("Menjalankan FFmpeg ke YouTube...")
 
     else:
@@ -219,7 +238,9 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
             log_callback("ERROR: Minimal 1 video diperlukan.")
             return
 
-        playlist = make_concat_playlist(video_paths)
+        # Jumlah pengulangan dibuat eksplisit di file concat agar putarannya pasti.
+        playlist_repeat = repeat_count if playback_mode == "Jumlah pengulangan" else 1
+        playlist = make_concat_playlist(video_paths, playlist_repeat)
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -228,24 +249,23 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
 
         if playback_mode == "Tanpa batas":
             cmd += ["-stream_loop", "-1"]
-        elif playback_mode == "Jumlah pengulangan":
-            cmd += ["-stream_loop", str(max(0, repeat_count - 1))]
 
         cmd += [
             "-f", "concat",
             "-safe", "0",
             "-i", playlist,
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", "ultrafast",
             "-tune", "zerolatency",
-            "-r", "30",
+            "-r", "20",
             "-pix_fmt", "yuv420p",
             "-profile:v", "main",
+            "-threads", "2",
             "-b:v", "2500k",
             "-maxrate", "2500k",
-            "-bufsize", "5000k",
-            "-g", "60",
-            "-keyint_min", "60",
+            "-bufsize", "3600k",
+            "-g", "50",
+            "-keyint_min", "50",
             "-sc_threshold", "0",
             "-c:a", "aac",
             "-b:a", "128k",
@@ -265,7 +285,7 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
 
         cmd += ["-f", "flv", output_url]
 
-        log_callback("Mode: 4 Video Playlist")
+        log_callback("Mode: 5 Video Playlist")
         log_callback("Urutan video:")
         for i, path in enumerate(video_paths, 1):
             log_callback(f"  {i}. {Path(path).name}")
@@ -273,7 +293,7 @@ def run_ffmpeg(mode, video_paths, audio_paths, stream_key, is_shorts, playback_m
         if playback_mode == "Tanpa batas":
             log_callback("Playlist video akan loop terus.")
         elif playback_mode == "Jumlah pengulangan":
-            log_callback(f"Playlist video diputar {repeat_count} kali.")
+            log_callback(f"Playlist 5 Video diputar tepat {repeat_count} kali, lalu streaming berhenti.")
         elif playback_mode == "Durasi streaming":
             log_callback(f"Streaming dibatasi {duration_hours:g} jam.")
         log_callback("Menjalankan FFmpeg ke YouTube...")
@@ -328,32 +348,18 @@ def main():
     )
     st.title("Live Streaming YouTube")
 
-    # Bagian iklan (optional)
-    show_ads = st.checkbox("Tampilkan Iklan", value=True)
-    if show_ads:
-        st.subheader("Iklan Sponsor")
-        components.html(
-            """
-            <div style="background:#f0f2f6;padding:20px;border-radius:10px;text-align:center">
-                <script type='text/javascript'
-                        src='//pl26562103.profitableratecpm.com/28/f9/95/28f9954a1d5bbf4924abe123c76a68d2.js'>
-                </script>
-                <p style="color:#888">Iklan akan muncul di sini</p>
-            </div>
-            """,
-            height=300
-        )
+    # Blok iklan lama yang memakai components.html sengaja dihapus karena API tersebut deprecated.
 
     mode = st.radio(
         "Pilih Mode Streaming",
-        ["4 Video Playlist", "Video + MP3"],
+        ["5 Video Playlist", "Video + MP3"],
         horizontal=True,
     )
 
     selected_paths = []
     audio_paths = []
 
-    if mode == "4 Video Playlist":
+    if mode == "5 Video Playlist":
         st.subheader("Upload Playlist — 5 Video")
         st.caption("Video akan dimainkan sesuai urutan: Video 1 → Video 2 → Video 3 → Video 4 → Video 5.")
         st.info("Setiap slot bisa menggunakan Upload, Link langsung, atau Google Drive. Video dari Link/Drive diunduh langsung ke server sehingga tidak perlu upload melalui browser.")
@@ -444,7 +450,7 @@ def main():
 
     else:
         st.subheader("Upload Video + MP3 — Playlist 5 MP3")
-        st.caption("1 video di-loop terus + MP3 1 → 2 → 3 → 4 → 5. Encoding dibuat stabil untuk mengurangi buffering/loading saat live.")
+        st.caption("1 video di-loop terus + MP3 1 → 2 → 3 → 4 → 5. Mode hemat CPU untuk Streamlit Cloud: encoding 1080p/20fps, preset ultrafast, dan bitrate CPU-efisien.")
         st.info("Tips: gunakan MP4 H.264 + AAC dan MP3 bitrate normal (128–320 kbps) agar perpindahan audio lebih lancar.")
 
         video_saved = None
